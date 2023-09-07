@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 )
@@ -22,7 +23,7 @@ func sendMessage(ctx context.Context, message string, chatID int) error {
 	}
 
 	// Send a post request with your token
-	sendMessageRes, err := http.Post(
+	response, err := http.Post(
 		SEND_ENDPOINT,
 		"application/json",
 		bytes.NewBuffer(resBytes))
@@ -30,10 +31,12 @@ func sendMessage(ctx context.Context, message string, chatID int) error {
 		log.Printf("could not send message: %s\n", err)
 		return err
 	}
-	defer sendMessageRes.Body.Close()
+	defer response.Body.Close()
 
-	if sendMessageRes.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK {
 		log.Printf("unexpected status: %s\n", err)
+		body, _ := io.ReadAll(response.Body)
+		log.Printf("body: %s", string(body))
 		return err
 	}
 

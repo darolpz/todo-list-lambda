@@ -27,7 +27,7 @@ const (
 	AddTaskCommand Command = "add_task"
 	AddListCommand Command = "add_list"
 	TaskCommand    Command = "tasks"
-	ListCommand    Command = "lists"
+	ListCommand    Command = "list"
 	BotCommand             = "bot_command"
 )
 
@@ -84,12 +84,21 @@ func main() {
 	lambda.Start(handler.Handle)
 }
 
+func (h handler) CleanQueue(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	log.Printf("cleaning messages")
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusOK,
+		Body:       "message processed succesfully",
+	}, nil
+}
+
 func (h handler) Handle(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	log.Printf("request: %v", request)
 	update := Update{}
 	if err := json.Unmarshal([]byte(request.Body), &update); err != nil {
 		log.Printf("could not unmarshal request: %s\n", err)
-		return events.APIGatewayProxyResponse{}, err
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+		}, err
 	}
 
 	if !validateUser(update.Message) {
@@ -99,17 +108,19 @@ func (h handler) Handle(ctx context.Context, request events.APIGatewayProxyReque
 		}, nil
 	}
 
+	log.Printf("message: %+v", update.Message)
 	if err := h.handleCommand(ctx, update.Message); err != nil {
 		log.Printf("could not handle command: %s\n", err)
-		return events.APIGatewayProxyResponse{}, err
+		// _ = sendMessage(ctx, fmt.Sprintf("could not handle command: %s\n", err), update.Message.Chat.ID)
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+		}, err
 	}
 
-	res := events.APIGatewayProxyResponse{
+	return events.APIGatewayProxyResponse{
 		StatusCode: http.StatusOK,
 		Body:       "message processed succesfully",
-	}
-
-	return res, nil
+	}, nil
 }
 
 func (h handler) handleCommand(ctx context.Context, m Message) error {
@@ -126,9 +137,9 @@ func (h handler) handleCommand(ctx context.Context, m Message) error {
 	case AddListCommand:
 		return AddMarketList(m.Text)
 	case TaskCommand:
-		return GetMarketList()
-	case ListCommand:
 		return h.GetTaskList(ctx)
+	case ListCommand:
+		return GetMarketList()
 	default:
 		return errors.New("invalid command")
 	}
@@ -163,7 +174,12 @@ func (h handler) GetTaskList(ctx context.Context) error {
 	}
 
 	for _, t := range tasks {
-		err = sendMessage(ctx, t.Text, t.ChatID)
+		chatID, err := strconv.Atoi(t.ChatID)
+		if err != nil {
+			log.Printf("chat id is not a number: %s", err)
+			return err
+		}
+		err = sendMessage(ctx, t.Text, chatID)
 		if err != nil {
 			log.Printf("could not send task: %s\n", err)
 			return err

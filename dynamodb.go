@@ -7,8 +7,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
@@ -24,7 +22,7 @@ type Task struct {
 	Status    string `json:"status"`
 	Date      string `json:"date"`
 	Text      string `json:"text"`
-	ChatID    int    `json:"chat_id"`
+	ChatID    string `json:"chat_id"`
 }
 
 type DynamoDB interface {
@@ -70,20 +68,15 @@ func (d *dynamoDB) AddTaskToDynamoDB(ctx context.Context, m Message) error {
 
 func (d *dynamoDB) ListPendingTasks(ctx context.Context) ([]Task, error) {
 	// Define the query parameters using expression builder
-	filter := expression.Equal(expression.Name("status"), expression.Value("TODO"))
-	builder := expression.NewBuilder().WithFilter(filter)
-	expr, err := builder.Build()
-	if err != nil {
-		log.Printf("could not build expresion: %s\n", err)
-		return nil, err
-	}
-
 	query := &dynamodb.QueryInput{
-		TableName:                 aws.String(TasksTable),
-		KeyConditionExpression:    expr.KeyCondition(),
-		FilterExpression:          expr.Filter(),
-		ExpressionAttributeNames:  expr.Names(),
-		ExpressionAttributeValues: expr.Values(),
+		TableName:              aws.String(TasksTable),
+		KeyConditionExpression: aws.String("#s = :value"), // Use an alias for "status"
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":value": &types.AttributeValueMemberS{Value: "TODO"},
+		},
+		ExpressionAttributeNames: map[string]string{
+			"#s": "status", // Define an alias for the "status" attribute
+		},
 	}
 
 	result, err := d.client.Query(ctx, query)
@@ -91,12 +84,21 @@ func (d *dynamoDB) ListPendingTasks(ctx context.Context) ([]Task, error) {
 		return nil, err
 	}
 
-	var tasks []Task = make([]Task, len(result.Items))
-
-	if err := attributevalue.UnmarshalListOfMaps(result.Items, &tasks); err != nil {
-		log.Printf("could not unmarshal result: %s\n", err)
-		return nil, err
+	var tasks []Task
+	// Iterate over the items in result.Items
+	for _, item := range result.Items {
+		// Access attribute values by attribute name
+		task := Task{
+			MessageID: item["message_id"].(*types.AttributeValueMemberS).Value,
+			Status:    item["status"].(*types.AttributeValueMemberS).Value,
+			Date:      item["date"].(*types.AttributeValueMemberS).Value,
+			Text:      item["text"].(*types.AttributeValueMemberS).Value,
+			ChatID:    item["chat_id"].(*types.AttributeValueMemberS).Value,
+		}
+		tasks = append(tasks, task)
 	}
+
+	log.Printf("tasks: %+v", tasks)
 
 	return tasks, nil
 }
@@ -110,7 +112,7 @@ func itemDataToAttributeValueMap(m Message) map[string]types.AttributeValue {
 
 	attrMap["text"] = &types.AttributeValueMemberS{Value: m.Text}
 	attrMap["date"] = &types.AttributeValueMemberS{Value: strconv.Itoa(m.Date)}
-	attrMap["chat_id"] = &types.AttributeValueMemberN{Value: strconv.Itoa(m.Chat.ID)}
+	attrMap["chat_id"] = &types.AttributeValueMemberS{Value: strconv.Itoa(m.Chat.ID)}
 
 	return attrMap
 }
