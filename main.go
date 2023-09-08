@@ -24,6 +24,7 @@ var (
 )
 
 const (
+	StartCommand   Command = "start"
 	AddTaskCommand Command = "add_task"
 	AddListCommand Command = "add_list"
 	TaskCommand    Command = "tasks"
@@ -31,34 +32,51 @@ const (
 	BotCommand             = "bot_command"
 )
 
+type CallbackData struct {
+	UserID string `json:"user_id"`
+	TaskID string `json:"task_id"`
+}
+
 type Update struct {
-	UpdateID int     `json:"update_id"`
-	Message  Message `json:"message"`
+	UpdateID      int            `json:"update_id"`
+	Message       Message        `json:"message"`
+	CallbackQuery *CallBackQuery `json:"callback_query,omitempty"`
+}
+
+type CallBackQuery struct {
+	Data    string  `json:"data"`
+	From    User    `json:"from"`
+	Message Message `json:"message"`
+}
+
+type Entity struct {
+	Type string `json:"type"`
+}
+
+type User struct {
+	ID       int    `json:"id"`
+	Username string `json:"username"`
+}
+
+type Chat struct {
+	ID       int    `json:"id"`
+	Username string `json:"username"`
 }
 type Message struct {
-	MessageID int `json:"message_id"`
-	From      struct {
-		ID       int    `json:"id"`
-		Username string `json:"username"`
-	} `json:"from"`
-	Chat struct {
-		ID       int    `json:"id"`
-		Username string `json:"username"`
-	} `json:"chat"`
-	Date     int    `json:"date"`
-	Text     string `json:"text"`
-	Entities []struct {
-		Type string `json:"type"`
-	} `json:"entities"`
+	MessageID int      `json:"message_id"`
+	From      User     `json:"from"`
+	Chat      Chat     `json:"chat"`
+	Date      int      `json:"date"`
+	Text      string   `json:"text"`
+	Entities  []Entity `json:"entities,omitempty"`
 }
 
-func (m Message) IsCommand() bool {
-	return m.Entities[0].Type == BotCommand
+func (u Update) IsCommand() bool {
+	return u.Message.Entities != nil && u.Message.Entities[0].Type == BotCommand
 }
 
-type ResponseBody struct {
-	ChatID int    `json:"chat_id"`
-	Text   string `json:"text"`
+func (u Update) IsCallback() bool {
+	return u.CallbackQuery != nil
 }
 
 type handler struct {
@@ -93,28 +111,41 @@ func (h handler) CleanQueue(ctx context.Context, request events.APIGatewayProxyR
 }
 
 func (h handler) Handle(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fmt.Printf("request: %+v\n", request.Body)
 	update := Update{}
 	if err := json.Unmarshal([]byte(request.Body), &update); err != nil {
 		log.Printf("could not unmarshal request: %s\n", err)
 		return events.APIGatewayProxyResponse{
-			StatusCode: http.StatusInternalServerError,
-		}, err
+			StatusCode: http.StatusOK,
+		}, nil
 	}
 
-	if !validateUser(update.Message) {
+	fmt.Printf("update: %+v\n", update)
+	if !validateUser(update) {
 		log.Printf("unauthorized user: user id %s", update.Message.From.Username)
 		return events.APIGatewayProxyResponse{
 			StatusCode: http.StatusOK,
 		}, nil
 	}
 
-	log.Printf("message: %+v", update.Message)
-	if err := h.handleCommand(ctx, update.Message); err != nil {
-		log.Printf("could not handle command: %s\n", err)
-		// _ = sendMessage(ctx, fmt.Sprintf("could not handle command: %s\n", err), update.Message.Chat.ID)
-		return events.APIGatewayProxyResponse{
-			StatusCode: http.StatusInternalServerError,
-		}, err
+	if update.IsCommand() {
+		if err := h.handleCommand(ctx, update); err != nil {
+			log.Printf("could not handle command: %s\n", err)
+			// _ = sendMessage(ctx, fmt.Sprintf("could not handle command: %s\n", err), update.Message.Chat.ID)
+			return events.APIGatewayProxyResponse{
+				StatusCode: http.StatusOK,
+			}, nil
+		}
+	}
+
+	if update.IsCallback() {
+		if err := h.handleCallback(ctx, update); err != nil {
+			log.Printf("could not handle callback: %s\n", err)
+			// _ = sendMessage(ctx, fmt.Sprintf("could not handle command: %s\n", err), update.Message.Chat.ID)
+			return events.APIGatewayProxyResponse{
+				StatusCode: http.StatusOK,
+			}, nil
+		}
 	}
 
 	return events.APIGatewayProxyResponse{
@@ -123,26 +154,38 @@ func (h handler) Handle(ctx context.Context, request events.APIGatewayProxyReque
 	}, nil
 }
 
-func (h handler) handleCommand(ctx context.Context, m Message) error {
-	if !m.IsCommand() {
+func (h handler) handleCommand(ctx context.Context, u Update) error {
+	if !u.IsCommand() {
 		return errors.New("update is not a command")
 	}
 
-	parts := strings.Fields(m.Text)
+	parts := strings.Fields(u.Message.Text)
 
 	command := Command(parts[0][1:])
 	switch command {
 	case AddTaskCommand:
-		return h.AddTask(ctx, m)
-	case AddListCommand:
-		return AddMarketList(m.Text)
+		return h.AddTask(ctx, u.Message)
 	case TaskCommand:
 		return h.GetTaskList(ctx)
-	case ListCommand:
-		return GetMarketList()
+	case StartCommand:
+		return nil
 	default:
 		return errors.New("invalid command")
 	}
+}
+
+func (h handler) handleCallback(ctx context.Context, u Update) error {
+	taskID := u.CallbackQuery.Data
+	if err := h.dynamoDB.DeleteTask(ctx, fmt.Sprintf("%d", u.CallbackQuery.From.ID), taskID); err != nil {
+		log.Printf("could not delete item: %s\n", err)
+		return err
+	}
+
+	if err := sendMessage(ctx, "task deleted succesfully", u.CallbackQuery.Message.Chat.ID); err != nil {
+		log.Printf("could not send message: %s\n", err)
+		return err
+	}
+	return nil
 }
 
 func (h handler) AddTask(ctx context.Context, m Message) error {
@@ -179,7 +222,8 @@ func (h handler) GetTaskList(ctx context.Context) error {
 			log.Printf("chat id is not a number: %s", err)
 			return err
 		}
-		err = sendMessage(ctx, t.Text, chatID)
+
+		err = sendMessage(ctx, t.Text, chatID, WithCallback(string(t.TaskID)))
 		if err != nil {
 			log.Printf("could not send task: %s\n", err)
 			return err
@@ -188,15 +232,8 @@ func (h handler) GetTaskList(ctx context.Context) error {
 	return nil
 }
 
-func AddMarketList(task string) error {
-	return nil
-}
-
-func GetMarketList() error {
-	return nil
-}
-
-func validateUser(m Message) bool {
+func validateUser(u Update) bool {
 	// This is a personal project, I validate if the user id is my own user id and if it is my own chat
-	return strconv.Itoa(m.From.ID) == USER_ID && strconv.Itoa(m.Chat.ID) == USER_ID
+	return (strconv.Itoa(u.Message.From.ID) == USER_ID && strconv.Itoa(u.Message.Chat.ID) == USER_ID) ||
+		(strconv.Itoa(u.CallbackQuery.From.ID) == USER_ID && strconv.Itoa(u.CallbackQuery.Message.Chat.ID) == USER_ID)
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/google/uuid"
 )
 
 const (
@@ -18,6 +19,8 @@ const (
 )
 
 type Task struct {
+	UserID    string `json:"user_id"`
+	TaskID    string `json:"task_id"`
 	MessageID string `json:"message_id"`
 	Status    string `json:"status"`
 	Date      string `json:"date"`
@@ -28,6 +31,7 @@ type Task struct {
 type DynamoDB interface {
 	AddTaskToDynamoDB(ctx context.Context, m Message) error
 	ListPendingTasks(ctx context.Context) ([]Task, error)
+	DeleteTask(ctx context.Context, userID, taskID string) error
 }
 
 type dynamoDB struct {
@@ -52,7 +56,7 @@ func NewDynamoDBRepository() (DynamoDB, error) {
 func (d *dynamoDB) AddTaskToDynamoDB(ctx context.Context, m Message) error {
 	// Define the DynamoDB PutItem input
 	input := &dynamodb.PutItemInput{
-		TableName: aws.String("tasks"),
+		TableName: aws.String(TasksTable),
 		Item:      itemDataToAttributeValueMap(m),
 	}
 
@@ -67,19 +71,28 @@ func (d *dynamoDB) AddTaskToDynamoDB(ctx context.Context, m Message) error {
 }
 
 func (d *dynamoDB) ListPendingTasks(ctx context.Context) ([]Task, error) {
-	// Define the query parameters using expression builder
-	query := &dynamodb.QueryInput{
-		TableName:              aws.String(TasksTable),
-		KeyConditionExpression: aws.String("#s = :value"), // Use an alias for "status"
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":value": &types.AttributeValueMemberS{Value: "TODO"},
-		},
-		ExpressionAttributeNames: map[string]string{
-			"#s": "status", // Define an alias for the "status" attribute
+	sortKeyName := "status"
+	sortKeyValue := "TODO"
+
+	filterExpression := "#s = :sortKey"
+	expressionAttributeValues := map[string]types.AttributeValue{
+		":sortKey": &types.AttributeValueMemberS{
+			Value: sortKeyValue,
 		},
 	}
 
-	result, err := d.client.Query(ctx, query)
+	expressionAttributeNames := map[string]string{
+		"#s": sortKeyName,
+	}
+
+	query := &dynamodb.ScanInput{
+		TableName:                 aws.String(TasksTable),
+		FilterExpression:          aws.String(filterExpression),
+		ExpressionAttributeValues: expressionAttributeValues,
+		ExpressionAttributeNames:  expressionAttributeNames,
+	}
+
+	result, err := d.client.Scan(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +102,8 @@ func (d *dynamoDB) ListPendingTasks(ctx context.Context) ([]Task, error) {
 	for _, item := range result.Items {
 		// Access attribute values by attribute name
 		task := Task{
+			UserID:    item["user_id"].(*types.AttributeValueMemberS).Value,
+			TaskID:    item["task_id"].(*types.AttributeValueMemberS).Value,
 			MessageID: item["message_id"].(*types.AttributeValueMemberS).Value,
 			Status:    item["status"].(*types.AttributeValueMemberS).Value,
 			Date:      item["date"].(*types.AttributeValueMemberS).Value,
@@ -103,10 +118,34 @@ func (d *dynamoDB) ListPendingTasks(ctx context.Context) ([]Task, error) {
 	return tasks, nil
 }
 
+func (d *dynamoDB) DeleteTask(ctx context.Context, userID, taskID string) error {
+
+	input := &dynamodb.DeleteItemInput{
+		TableName: aws.String(TasksTable),
+		Key: map[string]types.AttributeValue{
+			"user_id": &types.AttributeValueMemberS{
+				Value: userID,
+			},
+			"task_id": &types.AttributeValueMemberS{
+				Value: taskID,
+			},
+		},
+	}
+
+	_, err := d.client.DeleteItem(ctx, input)
+	if err != nil {
+		log.Printf("could not delete item %s: %s\n", taskID, err)
+		return err
+	}
+
+	return nil
+}
 func itemDataToAttributeValueMap(m Message) map[string]types.AttributeValue {
 	attrMap := make(map[string]types.AttributeValue)
 
 	// Convert Message fields to DynamoDB attribute values
+	attrMap["user_id"] = &types.AttributeValueMemberS{Value: strconv.Itoa(m.From.ID)}
+	attrMap["task_id"] = &types.AttributeValueMemberS{Value: uuid.New().String()}
 	attrMap["message_id"] = &types.AttributeValueMemberS{Value: strconv.Itoa(m.MessageID)}
 	attrMap["status"] = &types.AttributeValueMemberS{Value: TaskStatusTODO}
 
